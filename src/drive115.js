@@ -174,16 +174,19 @@ export class Drive115 {
   }
 
   async stream(song, request) {
-    const query = { pickcode: song.pickcode };
     try {
-      const { data, headers } = await this.api("/files/music", { ...query, play_origin: "1" });
+      // Parameters used by the 115 web audio player for a personal drive track.
+      const { data, headers } = await this.api("/files/music", {
+        pick_code: song.pickcode, play_origin: "1", platform: "weixin", format: "json"
+      });
       const info = data.data ?? data;
-      const source = typeof info === "string" ? info : info.file_url ?? info.url ?? info.audio_url;
+      const source = [data.url, data.audio_url, info.file_url, info.url, info.audio_url, info]
+        .find(value => typeof value === "string" && value.length > 0);
       return await this.serveMedia(mediaUrl(source), headers, song.item, request);
     } catch (musicError) {
       if (request.signal.aborted || !(musicError instanceof ApiError)) throw musicError;
       try {
-        const { data, headers } = await this.api("/files/download", query);
+        const { data, headers } = await this.api("/files/download", { pickcode: song.pickcode });
         return await this.serveMedia(mediaUrl((data.data ?? data).file_url), headers, song.item, request);
       } catch (downloadError) {
         if (!(downloadError instanceof ApiError)) throw downloadError;

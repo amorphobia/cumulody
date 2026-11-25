@@ -159,8 +159,9 @@ test("Range and If-Range reach the media host; only the ticket reaches the first
   assert.equal(r.headers.get("set-cookie"), null);
   assert.equal(await r.text(), "345");
   assert.equal(calls[2].url.pathname, "/files/music");
-  assert.equal(calls[2].url.searchParams.get("pickcode"), file.pc);
-  assert.equal(calls[2].url.searchParams.get("play_origin"), "1");
+  assert.deepEqual(Object.fromEntries(calls[2].url.searchParams), {
+    pick_code: file.pc, play_origin: "1", platform: "weixin", format: "json"
+  });
   assert.ok(!calls.some(({ url }) => url.pathname === "/files/download"));
   assert.equal(calls.at(-2).headers.get("cookie"), ticket);
   assert.equal(calls.at(-1).headers.get("cookie"), null);
@@ -181,8 +182,25 @@ test("a music redirect streams directly, and an unsupported web preview uses the
     const r = await handle(request("stream", { id: "s-" + file.fid }, { headers: { range: "bytes=3-5" } }), env, fetcher);
     assert.equal(r.status, 206);
     assert.equal(await r.text(), "345");
-    assert.equal(calls.some(({ url }) => url.pathname === "/files/download"), fallback);
+    const download = calls.find(({ url }) => url.pathname === "/files/download");
+    assert.equal(Boolean(download), fallback);
+    if (fallback) assert.deepEqual(Object.fromEntries(download.url.searchParams), { pickcode: file.pc });
     assert.ok(!calls.some(({ url }) => url.hostname === "outside.example"));
+  }
+});
+
+test("web player links take precedence over metadata, with audio_url as the alternate", async () => {
+  const original = "https://cdn.115.com/audio";
+  const alternative = "https://cdn.115.com/alternate";
+  for (const [url, audio_url, expected] of [[original, alternative, original], ["", alternative, alternative]]) {
+    const { fetcher, calls } = fixture(206, {
+      musicResponse: () => Response.json({ state: true, url, audio_url, data: { multimedia_id: "123" } })
+    });
+    const r = await handle(request("stream", { id: "s-" + file.fid }, { headers: { range: "bytes=3-5" } }), env, fetcher);
+    assert.equal(r.status, 206);
+    assert.equal(await r.text(), "345");
+    assert.equal(calls.find(call => call.url.hostname === "cdn.115.com").url.href, expected);
+    assert.ok(!calls.some(call => call.url.pathname === "/files/download"));
   }
 });
 

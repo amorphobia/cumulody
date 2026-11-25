@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { handle } from "../src/worker.js";
+import worker, { handle } from "../src/worker.js";
 
 const env = {
   DRIVE115_ROOT_CID: "42", DRIVE115_COOKIE: "UID=test-session",
@@ -79,6 +79,21 @@ test("directory pages are fully consumed, only directories and music are listed"
   assert.match(await xml.text(), /title="A &amp; B"/);
 });
 
+test("the Worker entry point calls native fetch with its required receiver", async t => {
+  const { fetcher } = fixture();
+  t.mock.method(globalThis, "fetch", function (url, init) {
+    assert.equal(this, globalThis);
+    return fetcher(url, init);
+  });
+  const result = await json(await worker.fetch(request("getIndexes"), env));
+  assert.equal(result.indexes.index[0].artist[0].id, "d-83");
+  const response = await worker.fetch(request("stream", { id: "s-" + file.fid }, {
+    headers: { range: "bytes=3-5" }
+  }), env);
+  assert.equal(response.status, 206);
+  assert.equal(await response.text(), "345");
+});
+
 test("numeric 115 IDs survive beyond 53 bits", async () => {
   const raw = '{"state":true,"path":[{"cid":42,"name":"Music"}],"count":1,"offset":0,"data":[{"fid":90071992547409939,"cid":42,"n":"L.m4a","s":3}]}';
   const r = await json(await handle(request("getMusicDirectory", { id: "d-42" }), env, async () => new Response(raw)));
@@ -108,6 +123,23 @@ test("upstream errors omit session and response content", async () => {
   const r = await handle(request("getIndexes"), env, async () => Response.json({ state: false, errno: 99, message: env.DRIVE115_COOKIE }));
   assert.equal(r.status, 502);
   assert.match((await json(r)).error.message, /^115 rejected \/files \(99\)\. Check the Cookie and file access\.$/);
+});
+
+test("directory errors identify the failing stage without returning upstream data", async () => {
+  const privateText = "private-upstream-detail";
+  const broken = () => new Response(new ReadableStream({
+    start(controller) { controller.error(new Error(privateText)); }
+  }));
+  for (const [fetcher, message] of [
+    [() => { throw new Error(privateText); }, "No HTTP response from 115 /files."],
+    [broken, "Could not read the body of 115 /files (HTTP 200)."],
+    [() => new Response("<html>" + privateText), "115 /files returned invalid JSON (HTTP 200)."],
+    [() => Response.json(null), "115 /files returned an unexpected JSON value (HTTP 200)."]
+  ]) {
+    const response = await handle(request("getIndexes"), env, fetcher);
+    assert.equal(response.status, 502);
+    assert.equal((await json(response)).error.message, message);
+  }
 });
 
 test("Range and If-Range reach the media host; only the ticket reaches the first CDN", async () => {

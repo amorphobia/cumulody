@@ -24,7 +24,7 @@ function indexes(root) {
   return { lastModified: Date.now(), ignoredArticles: "", index, child };
 }
 
-export async function handle(request, env, fetcher = fetch) {
+export async function handle(request, env, fetcher = globalThis.fetch.bind(globalThis)) {
   const url = new URL(request.url);
   const match = /^\/rest\/([A-Za-z0-9]+)(?:\.view)?$/.exec(url.pathname);
   if (!match) return new Response("Not found", { status: 404 });

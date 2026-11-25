@@ -60,7 +60,7 @@ export async function handle(request, env, fetcher = globalThis.fetch.bind(globa
         return reply(format, { song: item });
       }
       case "stream":
-        return await drive.stream(await drive.song(itemId(params, "s-")), request);
+        return await drive.stream(await drive.song(itemId(params, "s-")), request, params.get("c") === "cumulody-probe");
       default:
         throw new ApiError(0, "Endpoint not implemented.");
     }

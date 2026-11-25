@@ -13,7 +13,31 @@ const numericId = /^[1-9]\d*$/;
 const notFound = () => new ApiError(70, "Music item not found.");
 const upstream = message => new ApiError(0, message, 502);
 
-function rejectionDetails(data) {
+// Keep human-readable Chinese and common English status words. Never echo arbitrary
+// ASCII tokens (account identifiers, tickets and URL parameters can look like words).
+const diagnosticWords = new Set(("115 app vip svip ip api http https web pc browser client url " +
+  "account access address authentication authorization bad blocked busy cannot check code denied " +
+  "download error expired failed file forbidden format from get illegal in invalid is it limit link login " +
+  "mismatch missing network no not of on only or parameter permission play please region request required restricted " +
+  "retry server service session sign source temporarily the time timeout to too unavailable " +
+  "unknown unsupported user valid verification wrong your").split(" "));
+
+function playbackReason(text, cookie, pickcode) {
+  const secrets = cookie.split(";").map(pair => pair.slice(pair.indexOf("=") + 1).trim());
+  for (const value of [pickcode, ...secrets]) {
+    if (value) text = text.replaceAll(value, "…");
+  }
+  const excerpt = text.replace(/<[^>]*>/g, " ")
+    .replace(/(?:https?:)?\/\/[^\s<>"'，。；！？]+/gi, "…")
+    .replace(/[^\p{Script=Han}\s，。！？：；、（）…]+/gu, token => {
+      const word = token.replace(/[.,!?:;]+$/, "");
+      return diagnosticWords.has(word.toLowerCase()) ? word : "…";
+    })
+    .replace(/…(?:\s*…)+/g, "…").replace(/\s+/g, " ").trim();
+  return excerpt.length > 160 ? excerpt.slice(0, 159) + "…" : excerpt;
+}
+
+function rejectionDetails(data, diagnostic) {
   // 115 uses several spellings and may return errno=0 alongside a nonzero code.
   const fields = [];
   for (const key of ["errno", "errNo", "errcode", "errCode", "code", "msg_code"]) {
@@ -27,9 +51,9 @@ function rejectionDetails(data) {
   else if ([false, 0, "0", "false"].includes(data.state)) state = "false";
   fields.unshift("state=" + state);
 
-  // Return fixed descriptions only. Messages can contain a signed URL or account details.
-  const text = [data.error, data.msg, data.error_msg, data.message]
-    .filter(value => typeof value === "string" && value.trim()).join(" ");
+  const messages = [data.error, data.msg, data.error_msg, data.message]
+    .filter(value => typeof value === "string" && value.trim());
+  const text = [...new Set(messages)].join(" ");
   const reasons = [
     [/重新登[录陆]|未登[录陆]|登[录陆].{0,6}(过期|超时)/, "115 requested login."],
     [/验证(码|账号|身份)|安全验证/, "115 requested verification."],
@@ -40,6 +64,10 @@ function rejectionDetails(data) {
     [/操作太频繁|请求过于频繁/, "115 reported a rate limit."]
   ];
   const reason = reasons.find(([pattern]) => pattern.test(text))?.[1];
+  if (!reason && text && diagnostic) {
+    const excerpt = playbackReason(text, diagnostic.cookie, diagnostic.pickcode);
+    return "(" + fields.join(", ") + "). 115 message: " + (excerpt || "…");
+  }
   return "(" + fields.join(", ") + "). " +
     (reason ?? (text ? "115 supplied an unrecognized reason." : "115 supplied no reason text."));
 }
@@ -84,7 +112,7 @@ export class Drive115 {
     this.fetcher = fetcher;
   }
 
-  async api(path, query) {
+  async api(path, query, diagnostic) {
     const url = new URL(path, "https://webapi.115.com");
     url.search = new URLSearchParams(query);
     let response;
@@ -123,7 +151,7 @@ export class Drive115 {
       throw upstream(`115 ${path} returned an unexpected JSON value (HTTP ${response.status}).`);
     }
     if (![true, 1, "1"].includes(data.state)) {
-      throw upstream(`115 did not confirm success for ${path} ${rejectionDetails(data)}`);
+      throw upstream(`115 did not confirm success for ${path} ${rejectionDetails(data, diagnostic)}`);
     }
     return { data, headers: response.headers };
   }
@@ -173,12 +201,13 @@ export class Drive115 {
     return { item, pickcode: row.pc };
   }
 
-  async stream(song, request) {
+  async stream(song, request, explainRejection = false) {
+    const diagnostic = explainRejection ? { cookie: this.cookie, pickcode: song.pickcode } : undefined;
     try {
       // Parameters used by the 115 web audio player for a personal drive track.
       const { data, headers } = await this.api("/files/music", {
         pick_code: song.pickcode, play_origin: "1", platform: "weixin", format: "json"
-      });
+      }, diagnostic);
       const info = data.data ?? data;
       const source = [data.url, data.audio_url, info.file_url, info.url, info.audio_url, info]
         .find(value => typeof value === "string" && value.length > 0);
@@ -186,7 +215,7 @@ export class Drive115 {
     } catch (musicError) {
       if (request.signal.aborted || !(musicError instanceof ApiError)) throw musicError;
       try {
-        const { data, headers } = await this.api("/files/download", { pickcode: song.pickcode });
+        const { data, headers } = await this.api("/files/download", { pickcode: song.pickcode }, diagnostic);
         return await this.serveMedia(mediaUrl((data.data ?? data).file_url), headers, song.item, request);
       } catch (downloadError) {
         if (!(downloadError instanceof ApiError)) throw downloadError;

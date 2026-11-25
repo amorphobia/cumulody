@@ -22,14 +22,14 @@ function page(path, rows, offset = 0, count = rows.length) {
   return Response.json({ state: true, path, data: rows, offset, count });
 }
 
-function fixture(mediaStatus = 206, { musicResponse, downloadResponse } = {}) {
+function fixture(mediaStatus = 206, { musicResponse, downloadResponse, cookie = env.DRIVE115_COOKIE } = {}) {
   const calls = [];
   const linkHeaders = [["set-cookie", "UID=session-must-stay-private; Path=/"], ["set-cookie", ticket + "; Path=/"]];
   const fetcher = async (url, init) => {
     const headers = new Headers(init.headers);
     calls.push({ url, headers, init });
     if (url.hostname === "webapi.115.com") {
-      assert.equal(headers.get("cookie"), env.DRIVE115_COOKIE);
+      assert.equal(headers.get("cookie"), cookie);
       assert.equal(init.redirect, "manual");
       if (url.pathname === "/files/get_info") return Response.json({ state: true, data: [file] });
       if (url.pathname === "/files/music") {
@@ -241,6 +241,33 @@ test("zero errno cannot hide another error code or turn a rejected link into pla
     "(state=false, errno=0, msg_code=300104). 115 reported unsupported playback. " +
     "File download: 115 did not confirm success for /files/download (state=missing, errno=0, errCode=-1). 115 requested its client.");
   assert.ok(calls.every(({ url }) => url.hostname === "webapi.115.com"));
+});
+
+test("only an authenticated probe receives a bounded, redacted playback rejection excerpt", async () => {
+  const cookie = "UID=user-test; CID=access";
+  const signed = "https://cdn.115.com/file?ticket=private-ticket";
+  const text = "当前网络暂时无法提供服务：" + signed + " " + file.pc + " UID=user-test access 203.0.113.5";
+  const { calls, fetcher } = fixture(206, {
+    cookie,
+    musicResponse: () => Response.json({ state: false, errNo: 0, error: text, data: { secret: "nested-secret" } }),
+    downloadResponse: () => Response.json({ state: false, msg_code: 0, msg: "Access denied. " + "等待".repeat(100) })
+  });
+  const testEnv = { ...env, DRIVE115_COOKIE: cookie };
+  const stream = extra => request("stream", { id: "s-" + file.fid, ...extra });
+  const unauthorized = await json(await handle(stream({ c: "cumulody-probe", t: "invalid" }), testEnv, fetcher));
+  assert.equal(unauthorized.error.code, 40);
+  assert.equal(calls.length, 0);
+  const ordinary = await json(await handle(stream({}), testEnv, fetcher));
+  assert.ok(!ordinary.error.message.includes("当前网络"));
+  const result = await handle(stream({ c: "cumulody-probe" }), testEnv, fetcher);
+  assert.equal(result.status, 502);
+  const { message } = (await json(result)).error;
+  assert.match(message, /errNo=0\)\. 115 message: 当前网络暂时无法提供服务：…/);
+  assert.match(message, /msg_code=0\)\. 115 message: Access denied 等待/);
+  assert.ok(message.endsWith("…"));
+  for (const secret of [signed, "cdn.115.com", "private-ticket", file.pc, "user-test", "access", "203.0.113.5", "nested-secret"]) {
+    assert.ok(!message.includes(secret));
+  }
 });
 
 test("full GET, HEAD and unsatisfiable ranges preserve the media response semantics", async () => {

@@ -63,7 +63,7 @@ npm run probe -- https://cumulody.example.workers.dev
 如果同一首歌在本地可以播放、在云端取播放地址时失败，用下面的命令对照两端的配置。把地址和歌曲 ID 换成自己的。命令可直接在有 `.dev.vars` 的仓库目录运行，无需启动本地 Worker。
 
 ```powershell
-npm run probe -- https://cumulody.example.workers.dev s-123456789 --compare-local
+node --env-file-if-exists=.dev.vars scripts/probe.js https://cumulody.example.workers.dev s-123456789 --compare-local
 ```
 
 探针使用本地配置向 115 查询这首歌，再用一次性随机盐向已登录的云端接口校验 Cookie 和音乐取链请求。已有的同名环境变量优先于 `.dev.vars`。两行均为 `MATCH` 表示两端的 Cookie、请求方法、URL（含曲目的 pickcode）和程序设置的请求头一致。Cookie 不同时，第二项显示 `SKIPPED`。探针随后照常测试云端字节流。输出中不会出现 Cookie、pickcode 或签名链接。该对照覆盖 Cumulody 构造的请求，平台在传输时附加的信息不在对照范围内。

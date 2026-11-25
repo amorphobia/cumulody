@@ -6,7 +6,7 @@ async function main() {
   const [address, trackId, mode, ...extra] = process.argv.slice(2);
   const compare = mode === "--compare-local";
   if ((mode && !compare) || extra.length || (compare && !/^s-[1-9]\d*$/.test(trackId)) || trackId === "--compare-local") {
-    throw new Error("Usage: npm run probe -- <worker-url> <song-id> [--compare-local]");
+    throw new Error("Usage: node --env-file-if-exists=.dev.vars scripts/probe.js <worker-url> <song-id> [--compare-local]");
   }
   const base = new URL(address || "http://127.0.0.1:8787");
   if (base.protocol !== "https:" && !(base.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(base.hostname))) {

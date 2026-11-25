@@ -67,10 +67,12 @@ npm run probe -- https://cumulody.example.workers.dev
 | `ping`、`getOpenSubsonicExtensions` | 验证播放器凭据、发现 `formPost` 扩展。扩展发现可公开访问。 |
 | `getMusicFolders`、`getIndexes`、`getMusicDirectory` | 返回音乐库入口、根目录中的子目录和曲目，逐级浏览。目录列表从 115 分页读取。 |
 | `getSong` | 按 115 文件 ID 查找当前目录，再验证它仍在配置的音乐目录内。文件在音乐目录内改名或移动后保留歌曲 ID。 |
-| `stream` | 按需获取原文件地址，由 Worker 流式返回。支持 GET、HEAD 和字节 Range，上游返回 200、206 或 416 时保留对应状态。 |
+| `stream` | 通过 115 网页音乐播放接口请求原文件，由 Worker 流式返回。支持 GET、HEAD 和字节 Range，上游返回 200、206 或 416 时保留对应状态。 |
 
 端点路径为 `/rest/<方法名>`，也接受 `.view` 后缀。默认返回 XML，`f=json` 返回 JSON。播放器使用 Subsonic 的 `u/t/s` 盐化令牌，支持 GET 查询参数和 POST 表单。115 账号 Cookie 只发往固定的 115 API 主机。获取音频时只使用上游为该下载签发的临时票据。
 
-**当前限制**：曲目标题取自文件名，专辑和艺术家标签、封面、D1 索引以及 Feishin 的完整曲库浏览属于后续工作。当前取链使用 115 网页接口的 GET 形式，此接口对大于 200 MB 的文件可能拒绝取链。探针验证字节流，实际播放、暂停和切歌仍需在播放器中验证。后续凭据管理按「受保护的管理页更新 Cookie → 扫码连接」推进。
+播放时，Worker 先向 `/files/music` 请求原始音频。如果取不到可用的原文件流，再尝试原有的网页下载接口 `/files/download`。两个接口共用已配置的 115 Cookie。如果都失败，探针会分别显示音乐播放和文件下载失败的阶段。
+
+**当前限制**：曲目标题取自文件名，专辑和艺术家标签、封面、D1 索引以及 Feishin 的完整曲库浏览属于后续工作。探针验证字节流，实际播放、暂停和切歌仍需在播放器中验证。后续凭据管理按「受保护的管理页更新 Cookie → 扫码连接」推进。
 
 接口参考：[OpenSubsonic](https://opensubsonic.github.io/docs/opensubsonic-api/) · [115 网页接口的社区实现](https://github.com/ChenyangGao/p115client/blob/main/p115client/client.py) · [Cloudflare Workers Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)

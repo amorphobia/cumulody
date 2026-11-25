@@ -54,16 +54,32 @@ export class Drive115 {
   async api(path, query) {
     const url = new URL(path, "https://webapi.115.com");
     url.search = new URLSearchParams(query);
-    const response = await this.fetcher(url, {
-      headers: { cookie: this.cookie, referer, "user-agent": userAgent },
-      redirect: "manual"
-    });
+    let response;
+    try {
+      response = await this.fetcher(url, {
+        headers: { cookie: this.cookie, referer, "user-agent": userAgent },
+        redirect: "manual"
+      });
+    } catch {
+      throw upstream(`No HTTP response from 115 ${path}.`);
+    }
     if (!response.ok) throw upstream(`115 ${path} returned HTTP ${response.status}.`);
-    // Some 115 responses encode IDs as bare integers beyond JS's safe range.
-    const data = JSON.parse(await response.text(), (key, value, context) => {
-      if (typeof value === "number" && !Number.isSafeInteger(value) && context?.source) return context.source;
-      return value;
+    const body = await response.text().catch(() => {
+      throw upstream(`Could not read the body of 115 ${path} (HTTP ${response.status}).`);
     });
+    let data;
+    try {
+      // Some 115 responses encode IDs as bare integers beyond JS's safe range.
+      data = JSON.parse(body, (key, value, context) => {
+        if (typeof value === "number" && !Number.isSafeInteger(value) && context?.source) return context.source;
+        return value;
+      });
+    } catch {
+      throw upstream(`115 ${path} returned invalid JSON (HTTP ${response.status}).`);
+    }
+    if (data === null || typeof data !== "object" || Array.isArray(data)) {
+      throw upstream(`115 ${path} returned an unexpected JSON value (HTTP ${response.status}).`);
+    }
     if (![true, 1, "1"].includes(data.state)) {
       const code = String(data.errno ?? data.errNo ?? data.code ?? "");
       throw upstream(`115 rejected ${path}${/^\d+$/.test(code) ? " (" + code + ")" : ""}. Check the Cookie and file access.`);

@@ -9,15 +9,35 @@ async function main() {
   const { SUBSONIC_USER: user, SUBSONIC_PASSWORD: password } = process.env;
   if (!user || !password) throw new Error("Set SUBSONIC_USER and SUBSONIC_PASSWORD first.");
 
-  function call(endpoint, params = {}, headers = {}) {
+  async function call(endpoint, params = {}, headers = {}) {
     const salt = randomBytes(16).toString("hex");
     const token = createHash("md5").update(password + salt).digest("hex");
     const body = new URLSearchParams({ u: user, t: token, s: salt, c: "cumulody-probe", v: "1.16.1", f: "json", ...params });
-    return fetch(new URL("/rest/" + endpoint, base), { method: "POST", body, headers, redirect: "error" });
+    let response;
+    try {
+      response = await fetch(new URL("/rest/" + endpoint, base), { method: "POST", body, headers, redirect: "manual" });
+    } catch (error) {
+      // Node may report separate IPv4/IPv6 failures inside an AggregateError.
+      const cause = error.cause;
+      const codes = [cause, ...(cause?.errors ?? [])].map(e => e?.code).filter(Boolean);
+      const detail = [...new Set(codes)].join(", ");
+      throw new Error(`${endpoint}: ${error.message}${detail ? " (" + detail + ")" : ""}`);
+    }
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel();
+      throw new Error(`${endpoint}: HTTP ${response.status} redirect. Check the Worker URL and access settings.`);
+    }
+    return response;
   }
   async function api(endpoint, params) {
     const response = await call(endpoint, params);
-    const result = (await response.json())["subsonic-response"];
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      throw new Error(`${endpoint}: HTTP ${response.status}, expected a Subsonic JSON response.`);
+    }
+    const result = data?.["subsonic-response"];
     if (!response.ok || result?.status !== "ok") {
       throw new Error(`${endpoint}: ${result?.error?.message || response.status}`);
     }
@@ -25,6 +45,7 @@ async function main() {
   }
 
   await api("ping");
+  console.log("ping: OK");
   const { indexes } = await api("getIndexes", { musicFolderId: "1" });
   const dirs = indexes.index.flatMap(group => group.artist);
   console.log(`Music root: ${dirs.length} folders, ${indexes.child.length} tracks`);

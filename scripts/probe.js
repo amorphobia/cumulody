@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
+import { Drive115 } from "../src/drive115.js";
 
 async function main() {
-  const base = new URL(process.argv[2] || "http://127.0.0.1:8787");
+  const [address, trackId, mode, ...extra] = process.argv.slice(2);
+  const compare = mode === "--compare-local";
+  if ((mode && !compare) || extra.length || (compare && !/^s-[1-9]\d*$/.test(trackId)) || trackId === "--compare-local") {
+    throw new Error("Usage: npm run probe -- <worker-url> <song-id> [--compare-local]");
+  }
+  const base = new URL(address || "http://127.0.0.1:8787");
   if (base.protocol !== "https:" && !(base.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(base.hostname))) {
     throw new Error("Use HTTPS or a local Worker.");
   }
@@ -10,7 +16,7 @@ async function main() {
   if (!user || !password) throw new Error("Set SUBSONIC_USER and SUBSONIC_PASSWORD first.");
 
   function call(endpoint, params = {}, headers = {}) {
-    const salt = randomBytes(16).toString("hex");
+    const salt = params.s ?? randomBytes(16).toString("hex");
     const token = createHash("md5").update(password + salt).digest("hex");
     const body = new URLSearchParams({ u: user, t: token, s: salt, c: "cumulody-probe", v: "1.16.1", f: "json", ...params });
     return fetch(new URL("/rest/" + endpoint, base), { method: "POST", body, headers, redirect: "error" });
@@ -28,7 +34,25 @@ async function main() {
   const { indexes } = await api("getIndexes", { musicFolderId: "1" });
   const dirs = indexes.index.flatMap(group => group.artist);
   console.log(`Music root: ${dirs.length} folders, ${indexes.child.length} tracks`);
-  let track = process.argv[3] ? (await api("getSong", { id: process.argv[3] })).song : indexes.child[0];
+  const songParams = { id: trackId };
+  if (compare) {
+    const local = new Drive115(process.env, globalThis.fetch.bind(globalThis));
+    const { pickcode } = await local.song(trackId.slice(2)).catch(error => {
+      throw new Error("Local 115 song lookup: " + error.message);
+    });
+    songParams.s = randomBytes(16).toString("hex");
+    Object.assign(songParams, local.playbackProofs(songParams.s, pickcode));
+  }
+  const details = trackId ? await api("getSong", songParams) : undefined;
+  if (compare) {
+    const result = details.cumulodyComparison;
+    if (typeof result?.cookie !== "boolean" || (result.cookie && typeof result.musicRequest !== "boolean")) {
+      throw new Error("This Worker does not support playback comparison. Check its deployed version.");
+    }
+    console.log("115 Cookie: " + (result.cookie ? "MATCH" : "DIFFERENT"));
+    console.log("Music lookup request: " + (!result.cookie ? "SKIPPED" : result.musicRequest ? "MATCH" : "DIFFERENT"));
+  }
+  let track = details?.song ?? indexes.child[0];
   const seen = new Set();
   while (!track && dirs.length) {
     const { id } = dirs.pop();

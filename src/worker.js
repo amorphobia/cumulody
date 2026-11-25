@@ -1,3 +1,5 @@
+import { Buffer } from "node:buffer";
+import { timingSafeEqual } from "node:crypto";
 import { Drive115 } from "./drive115.js";
 import { ApiError, authenticate, reply } from "./subsonic.js";
 
@@ -6,6 +8,19 @@ function itemId(params, prefix) {
   if (!id) throw new ApiError(10, "Supply an item ID.");
   if (!id.startsWith(prefix) || !/^[1-9]\d*$/.test(id.slice(2))) throw new ApiError(70, "Music item not found.");
   return id.slice(2);
+}
+
+function comparePlayback(drive, pickcode, params) {
+  const salt = params.get("s");
+  const cookieProof = params.get("cookieProof");
+  const musicProof = params.get("musicProof");
+  if (!/^[a-f0-9]{32}$/.test(salt) || ![cookieProof, musicProof].every(value => /^[a-f0-9]{64}$/.test(value))) {
+    throw new ApiError(10, "Invalid playback comparison.");
+  }
+  const expected = drive.playbackProofs(salt, pickcode);
+  const matches = (a, b) => timingSafeEqual(Buffer.from(a, "hex"), Buffer.from(b, "hex"));
+  const cookie = matches(cookieProof, expected.cookieProof);
+  return cookie ? { cookie, musicRequest: matches(musicProof, expected.musicProof) } : { cookie };
 }
 
 function indexes(root) {
@@ -56,7 +71,10 @@ export async function handle(request, env, fetcher = globalThis.fetch.bind(globa
       case "getMusicDirectory":
         return reply(format, { directory: await drive.directory(itemId(params, "d-")) });
       case "getSong": {
-        const { item } = await drive.song(itemId(params, "s-"));
+        const { item, pickcode } = await drive.song(itemId(params, "s-"));
+        if (request.method === "POST" && params.get("c") === "cumulody-probe" && params.has("cookieProof")) {
+          return reply(format, { song: item, cumulodyComparison: comparePlayback(drive, pickcode, params) });
+        }
         return reply(format, { song: item });
       }
       case "stream":

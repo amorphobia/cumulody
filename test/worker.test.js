@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import worker, { handle } from "../src/worker.js";
+import { Drive115 } from "../src/drive115.js";
 
 const env = {
   DRIVE115_ROOT_CID: "42", DRIVE115_COOKIE: "UID=test-session",
@@ -129,6 +130,37 @@ test("upstream errors omit session and response content", async () => {
   assert.equal(r.status, 502);
   assert.equal((await json(r)).error.message,
     "115 did not confirm success for /files (state=false, errno=99). 115 supplied an unrecognized reason.");
+});
+
+test("an authenticated probe compares private playback inputs without returning their values or proofs", async () => {
+  const salt = "ad".repeat(16);
+  const drive = new Drive115(env, fixture().fetcher);
+  const proofs = drive.playbackProofs(salt, file.pc);
+  const form = { ...params, c: "cumulody-probe", id: "s-" + file.fid, s: salt,
+    t: createHash("md5").update(env.SUBSONIC_PASSWORD + salt).digest("hex"), ...proofs };
+  const { fetcher, calls } = fixture();
+  async function check(fields) {
+    const r = await handle(new Request("https://worker.example/rest/getSong", {
+      method: "POST", body: new URLSearchParams({ ...form, ...fields })
+    }), env, fetcher);
+    return json(r);
+  }
+  assert.equal((await check({ t: "bad" })).error.code, 40);
+  assert.equal(calls.length, 0);
+  assert.equal((await check({ cookieProof: "bad" })).error.code, 10);
+  assert.equal((await check({ c: "player" })).cumulodyComparison, undefined);
+  const result = await check({});
+  assert.deepEqual(result.cumulodyComparison, { cookie: true, musicRequest: true });
+  assert.equal(result.song.id, form.id);
+  for (const value of [file.pc, env.DRIVE115_COOKIE, ...Object.values(proofs)]) {
+    assert.ok(!JSON.stringify(result).includes(value));
+  }
+  assert.deepEqual((await check(drive.playbackProofs(salt, "different-track"))).cumulodyComparison,
+    { cookie: true, musicRequest: false });
+  const other = new Drive115({ ...env, DRIVE115_COOKIE: "UID=other-session" }, fetcher);
+  assert.deepEqual((await check(other.playbackProofs(salt, file.pc))).cumulodyComparison, { cookie: false });
+  assert.deepEqual((await check(drive.playbackProofs("bc".repeat(16), file.pc))).cumulodyComparison, { cookie: false });
+  assert.ok(calls.every(({ url }) => ["/files/get_info", "/files"].includes(url.pathname)));
 });
 
 test("directory errors identify the failing stage without returning upstream data", async () => {

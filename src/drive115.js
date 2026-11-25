@@ -1,4 +1,5 @@
 import { ApiError } from "./subsonic.js";
+import { createHmac } from "node:crypto";
 
 const types = new Map(Object.entries({
   flac: "audio/flac", mp3: "audio/mpeg", m4a: "audio/mp4", m4b: "audio/mp4",
@@ -112,15 +113,38 @@ export class Drive115 {
     this.fetcher = fetcher;
   }
 
-  async api(path, query, diagnostic) {
+  webRequest(path, query) {
     const url = new URL(path, "https://webapi.115.com");
     url.search = new URLSearchParams(query);
+    return { url, init: {
+      method: "GET", headers: { cookie: this.cookie, referer, "user-agent": userAgent }, redirect: "manual"
+    } };
+  }
+
+  musicRequest(pickcode) {
+    return this.webRequest("/files/music", {
+      pick_code: pickcode, play_origin: "1", platform: "weixin", format: "json"
+    });
+  }
+
+  playbackProofs(salt, pickcode) {
+    const { url, init } = this.musicRequest(pickcode);
+    const headers = new Headers(init.headers);
+    const cookie = headers.get("cookie");
+    headers.delete("cookie");
+    const sign = (...fields) => createHmac("sha256", cookie)
+      .update(JSON.stringify(["cumulody-playback-check-v1", salt, ...fields])).digest("hex");
+    return {
+      cookieProof: sign("cookie"),
+      musicProof: sign("music", init.method, url.href, [...headers], init.redirect)
+    };
+  }
+
+  async api({ url, init }, diagnostic) {
+    const path = url.pathname;
     let response;
     try {
-      response = await this.fetcher(url, {
-        headers: { cookie: this.cookie, referer, "user-agent": userAgent },
-        redirect: "manual"
-      });
+      response = await this.fetcher(url, init);
     } catch {
       throw upstream(`No HTTP response from 115 ${path}.`);
     }
@@ -157,10 +181,10 @@ export class Drive115 {
   }
 
   async page(cid, offset, limit) {
-    const { data } = await this.api("/files", {
+    const { data } = await this.api(this.webRequest("/files", {
       cid, aid: "1", cur: "1", show_dir: "1", count_folders: "1", record_open_time: "0",
       offset, limit, o: "file_name", asc: "1", custom_order: "2"
-    });
+    }));
     // An invalid CID may silently list the drive root. Verify the actual path on every page.
     const path = data.path;
     if (!Array.isArray(path) || String(path.at(-1)?.cid) !== cid ||
@@ -191,7 +215,7 @@ export class Drive115 {
   }
 
   async song(fid) {
-    const { data } = await this.api("/files/get_info", { file_id: fid });
+    const { data } = await this.api(this.webRequest("/files/get_info", { file_id: fid }));
     const row = data.data?.[0];
     if (!row || String(row.fid) !== fid || (row.aid != null && String(row.aid) !== "1") ||
         !numericId.test(String(row.cid))) throw notFound();
@@ -205,9 +229,7 @@ export class Drive115 {
     const diagnostic = explainRejection ? { cookie: this.cookie, pickcode: song.pickcode } : undefined;
     try {
       // Parameters used by the 115 web audio player for a personal drive track.
-      const { data, headers } = await this.api("/files/music", {
-        pick_code: song.pickcode, play_origin: "1", platform: "weixin", format: "json"
-      }, diagnostic);
+      const { data, headers } = await this.api(this.musicRequest(song.pickcode), diagnostic);
       const info = data.data ?? data;
       const source = [data.url, data.audio_url, info.file_url, info.url, info.audio_url, info]
         .find(value => typeof value === "string" && value.length > 0);
@@ -215,7 +237,7 @@ export class Drive115 {
     } catch (musicError) {
       if (request.signal.aborted || !(musicError instanceof ApiError)) throw musicError;
       try {
-        const { data, headers } = await this.api("/files/download", { pickcode: song.pickcode }, diagnostic);
+        const { data, headers } = await this.api(this.webRequest("/files/download", { pickcode: song.pickcode }), diagnostic);
         return await this.serveMedia(mediaUrl((data.data ?? data).file_url), headers, song.item, request);
       } catch (downloadError) {
         if (!(downloadError instanceof ApiError)) throw downloadError;

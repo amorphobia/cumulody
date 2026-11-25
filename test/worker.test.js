@@ -127,7 +127,8 @@ test("a moved song is checked against its current parent before the URL lookup",
 test("upstream errors omit session and response content", async () => {
   const r = await handle(request("getIndexes"), env, async () => Response.json({ state: false, errno: 99, message: env.DRIVE115_COOKIE }));
   assert.equal(r.status, 502);
-  assert.match((await json(r)).error.message, /^115 rejected \/files \(99\)\. Check the Cookie and file access\.$/);
+  assert.equal((await json(r)).error.message,
+    "115 did not confirm success for /files (state=false, errno=99). 115 supplied an unrecognized reason.");
 });
 
 test("directory errors identify the failing stage without returning upstream data", async () => {
@@ -206,8 +207,22 @@ test("failed playback and download report both upstream stages without exposing 
   const r = await handle(request("stream", { id: "s-" + file.fid }), env, fetcher);
   assert.equal(r.status, 502);
   const { message } = (await json(r)).error;
-  assert.match(message, /\/files\/music \(901\).*\/files\/download returned HTTP 403/);
+  assert.match(message, /\/files\/music \(state=false, errcode=901\).*\/files\/download returned HTTP 403/);
   assert.ok(!message.includes(env.DRIVE115_COOKIE) && !message.includes("private details"));
+});
+
+test("zero errno cannot hide another error code or turn a rejected link into playable media", async () => {
+  const { calls, fetcher } = fixture(206, {
+    musicResponse: () => Response.json({ state: false, errno: 0, msg_code: 300104, error: "文件超过200MB，暂不支持播放",
+      file_url: "https://cdn.115.com/private" }),
+    downloadResponse: () => Response.json({ errno: "0", errCode: "-1", msg: "请使用115客户端下载 " + env.DRIVE115_COOKIE })
+  });
+  const r = await handle(request("stream", { id: "s-" + file.fid }), env, fetcher);
+  assert.equal(r.status, 502);
+  assert.equal((await json(r)).error.message, "Music playback: 115 did not confirm success for /files/music " +
+    "(state=false, errno=0, msg_code=300104). 115 reported unsupported playback. " +
+    "File download: 115 did not confirm success for /files/download (state=missing, errno=0, errCode=-1). 115 requested its client.");
+  assert.ok(calls.every(({ url }) => url.hostname === "webapi.115.com"));
 });
 
 test("full GET, HEAD and unsatisfiable ranges preserve the media response semantics", async () => {

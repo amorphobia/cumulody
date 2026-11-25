@@ -13,6 +13,37 @@ const numericId = /^[1-9]\d*$/;
 const notFound = () => new ApiError(70, "Music item not found.");
 const upstream = message => new ApiError(0, message, 502);
 
+function rejectionDetails(data) {
+  // 115 uses several spellings and may return errno=0 alongside a nonzero code.
+  const fields = [];
+  for (const key of ["errno", "errNo", "errcode", "errCode", "code", "msg_code"]) {
+    const value = data[key];
+    if ((typeof value === "number" || typeof value === "string") && /^-?\d{1,9}$/.test(value)) {
+      fields.push(key + "=" + value);
+    }
+  }
+  let state = "unrecognized";
+  if (!Object.hasOwn(data, "state")) state = "missing";
+  else if ([false, 0, "0", "false"].includes(data.state)) state = "false";
+  fields.unshift("state=" + state);
+
+  // Return fixed descriptions only. Messages can contain a signed URL or account details.
+  const text = [data.error, data.msg, data.error_msg, data.message]
+    .filter(value => typeof value === "string" && value.trim()).join(" ");
+  const reasons = [
+    [/重新登[录陆]|未登[录陆]|登[录陆].{0,6}(过期|超时)/, "115 requested login."],
+    [/验证(码|账号|身份)|安全验证/, "115 requested verification."],
+    [/(使用|打开|升级|前往|请在).{0,20}(客户端|浏览器|115生活|115APP)/i, "115 requested its client."],
+    [/暂不支持播放|不支持.{0,8}(格式|播放)|不支持的.{0,8}格式/, "115 reported unsupported playback."],
+    [/文件不存在|文件已删除/, "115 reported that the file is unavailable."],
+    [/参数错误|无效参数/, "115 reported invalid parameters."],
+    [/操作太频繁|请求过于频繁/, "115 reported a rate limit."]
+  ];
+  const reason = reasons.find(([pattern]) => pattern.test(text))?.[1];
+  return "(" + fields.join(", ") + "). " +
+    (reason ?? (text ? "115 supplied an unrecognized reason." : "115 supplied no reason text."));
+}
+
 function entry(row) {
   const isDir = row.fc == null ? !row.fid || row.fid === "0" : String(row.fc) === "0";
   const id = String(isDir ? row.cid : row.fid);
@@ -92,8 +123,7 @@ export class Drive115 {
       throw upstream(`115 ${path} returned an unexpected JSON value (HTTP ${response.status}).`);
     }
     if (![true, 1, "1"].includes(data.state)) {
-      const code = String(data.errno ?? data.errNo ?? data.errcode ?? data.code ?? "");
-      throw upstream(`115 rejected ${path}${/^\d+$/.test(code) ? " (" + code + ")" : ""}. Check the Cookie and file access.`);
+      throw upstream(`115 did not confirm success for ${path} ${rejectionDetails(data)}`);
     }
     return { data, headers: response.headers };
   }

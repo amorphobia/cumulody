@@ -22,8 +22,9 @@ function page(path, rows, offset = 0, count = rows.length) {
   return Response.json({ state: true, path, data: rows, offset, count });
 }
 
-function fixture(mediaStatus = 206) {
+function fixture(mediaStatus = 206, { musicResponse, downloadResponse } = {}) {
   const calls = [];
+  const linkHeaders = [["set-cookie", "UID=session-must-stay-private; Path=/"], ["set-cookie", ticket + "; Path=/"]];
   const fetcher = async (url, init) => {
     const headers = new Headers(init.headers);
     calls.push({ url, headers, init });
@@ -31,8 +32,12 @@ function fixture(mediaStatus = 206) {
       assert.equal(headers.get("cookie"), env.DRIVE115_COOKIE);
       assert.equal(init.redirect, "manual");
       if (url.pathname === "/files/get_info") return Response.json({ state: true, data: [file] });
-      if (url.pathname === "/files/download") return Response.json({ state: true, file_url: "https://cdn.115.com/audio" },
-        { headers: [["set-cookie", "UID=session-must-stay-private; Path=/"], ["set-cookie", ticket + "; Path=/"]] });
+      if (url.pathname === "/files/music") {
+        return musicResponse?.() ?? Response.json({ state: true, data: { url: "https://cdn.115.com/audio" } }, { headers: linkHeaders });
+      }
+      if (url.pathname === "/files/download") {
+        return downloadResponse?.() ?? Response.json({ state: true, file_url: "https://cdn.115.com/audio" }, { headers: linkHeaders });
+      }
       const cid = url.searchParams.get("cid");
       if (cid === "83") return page([top, album], [file]);
       if (cid === "42") {
@@ -152,12 +157,57 @@ test("Range and If-Range reach the media host; only the ticket reaches the first
   assert.equal(r.headers.get("content-type"), "audio/flac");
   assert.equal(r.headers.get("set-cookie"), null);
   assert.equal(await r.text(), "345");
+  assert.equal(calls[2].url.pathname, "/files/music");
+  assert.equal(calls[2].url.searchParams.get("pickcode"), file.pc);
+  assert.equal(calls[2].url.searchParams.get("play_origin"), "1");
+  assert.ok(!calls.some(({ url }) => url.pathname === "/files/download"));
   assert.equal(calls.at(-2).headers.get("cookie"), ticket);
   assert.equal(calls.at(-1).headers.get("cookie"), null);
   assert.equal(calls.at(-1).headers.get("authorization"), null);
   assert.equal(calls.at(-1).headers.get("range"), "bytes=3-5");
   assert.equal(calls.at(-1).headers.get("if-range"), '"v1"');
   assert.equal(calls[0].headers.get("user-agent"), calls.at(-1).headers.get("user-agent"));
+});
+
+test("a music redirect streams directly, and an unsupported web preview uses the file endpoint", async () => {
+  for (const [musicResponse, fallback] of [
+    [() => Response.redirect("https://cdn.115.com/audio"), false],
+    [() => Response.json({ state: false }), true],
+    [() => Response.json({ state: true, data: {} }), true],
+    [() => Response.redirect("https://outside.example/audio"), true]
+  ]) {
+    const { calls, fetcher } = fixture(206, { musicResponse });
+    const r = await handle(request("stream", { id: "s-" + file.fid }, { headers: { range: "bytes=3-5" } }), env, fetcher);
+    assert.equal(r.status, 206);
+    assert.equal(await r.text(), "345");
+    assert.equal(calls.some(({ url }) => url.pathname === "/files/download"), fallback);
+    assert.ok(!calls.some(({ url }) => url.hostname === "outside.example"));
+  }
+});
+
+test("an audio preview whose length differs from the original falls back before streaming bytes", async () => {
+  const { calls, fetcher } = fixture(206, {
+    musicResponse: () => Response.redirect("https://cdn.115.com/preview")
+  });
+  const response = await handle(request("stream", { id: "s-" + file.fid }, { headers: { range: "bytes=3-5" } }), env,
+    (url, init) => url.pathname === "/preview"
+      ? new Response("bad", { status: 206, headers: { "content-range": "bytes 3-5/9" } })
+      : fetcher(url, init));
+  assert.ok(calls.some(({ url }) => url.pathname === "/files/download"));
+  assert.equal(response.headers.get("content-range"), "bytes 3-5/10");
+  assert.equal(await response.text(), "345");
+});
+
+test("failed playback and download report both upstream stages without exposing their responses", async () => {
+  const { fetcher } = fixture(206, {
+    musicResponse: () => Response.json({ state: false, errcode: 901, message: env.DRIVE115_COOKIE }),
+    downloadResponse: () => new Response("private details", { status: 403 })
+  });
+  const r = await handle(request("stream", { id: "s-" + file.fid }), env, fetcher);
+  assert.equal(r.status, 502);
+  const { message } = (await json(r)).error;
+  assert.match(message, /\/files\/music \(901\).*\/files\/download returned HTTP 403/);
+  assert.ok(!message.includes(env.DRIVE115_COOKIE) && !message.includes("private details"));
 });
 
 test("full GET, HEAD and unsatisfiable ranges preserve the media response semantics", async () => {
